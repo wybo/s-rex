@@ -1,0 +1,444 @@
+#!/usr/bin/env ruby
+
+# == Synopsis
+#   Scan-Ruby-Latex, s-rex in short, is a program for stitching
+#   together scanned pages into a .pdf file. Requires b-rex and
+#   RMagick.
+#
+# == Usage
+#   To turn a series of .pngs into a .pdf
+#     ./s-rex my_file_0001.png
+#
+#   Other examples:
+#     s-rex my_file_0001_small.png (does not re-scale the file)
+#
+# It is assumed that files are named with <name>_<number>.png
+#
+# So:
+# my_file_0001.png
+# my_file_0002.png
+# my_file_0003.png
+#
+# Will be turned into
+# my_file.pdf
+#
+# Alternatively:
+# ./s-rex My_file.CH.1.pdf
+#
+# Will turn:
+# My_file.CH.1.pdf
+# My_file.CH.3.pdf
+# My_file.CH.20.pdf
+#
+# Into:
+# My_file.pdf
+#
+# And:
+# ./s-rex *.pdf 
+# (list of files)
+#
+# Will turn:
+# 01_file.pdf
+# My_file3.pdf
+#
+# Into:
+# S-rex-out.pdf
+#
+# == Options
+#   -h, --help              Displays help message
+#   -v, --version           Display the version, then exit
+#   -V, --verbose           Verbose output
+#   -r, --rescale           Rescales the images
+#   -b, --build             Builds the latex files
+#   -m, --make              Runs b-rex to compile the files
+#   -l, --landscape         Makes stitched together pdf's landscape
+#   -L, --reverselandscape  Makes stitched together pdf's landscape
+#
+# == Requirements
+#   Ruby (inc rdoc, not included in Debian & Ubuntu, needs ruby and rdoc
+#   packages there), b-rex and RMagick
+#
+#   (b-rex can be found here
+#   http://en.logilogi.org/Wybo_Wiersma/User/Beamer_Ruby_Latex)
+#
+# == Copyright
+#   Copyright (c) 2007 The LogiLogi Foundation. Licensed under the
+#   Affero GPL: http://www.fsf.org/licensing/licenses/agpl-3.0.html
+
+require 'optparse'
+require 'ostruct'
+require 'date'
+require "rubygems"
+require "RMagick"
+
+class SRex
+  VERSION = '0.5.0'
+
+  INNER_SUFFIX = '.inner'
+  OUTER_SUFFIX = '.outer'
+  BASE_PATH = '.'
+  BREX = 'b-rex'
+
+  attr_reader :options
+
+  def initialize(arguments)
+    @arguments = arguments
+
+    # Set defaults
+    @options = OpenStruct.new
+    @options.verbose = false
+  end
+
+  # Parse options, check arguments, then process the command
+  def run
+    if parsed_options?
+      puts "Start at #{DateTime.now}" if @options.verbose
+
+      output_options if @options.verbose
+      preprocess_options
+      run_app
+
+      puts "Finished at #{DateTime.now}" if @options.verbose
+    else
+      output_help
+    end
+  end
+
+  protected
+
+  def parsed_options?
+    # Specify options
+    @opts = OptionParser.new
+    @opts.on('-v', '--version') { output_version ; exit 0 }
+    @opts.on('-h', '--help') { output_help }
+    @opts.on('-V', '--verbose') { @options.verbose = true }
+    @opts.on('-r', '--rescale') { @options.rescale = true }
+    @opts.on('-b', '--build') { @options.build = true }
+    @opts.on('-m', '--make') { @options.make = true }
+    @opts.on('-l', '--landscape') { @options.landscape = true }
+    @opts.on('-L', '--reverselandscape') { @options.landscape = true ; @options.reverse = true}
+
+    @opts.parse!(@arguments) rescue return false
+    @options.file_names = @arguments
+    true
+  end
+
+  def output_options
+    puts "Options:"
+
+    @options.marshal_dump.each do |name, val|
+      puts "  #{name} = #{val}"
+    end
+  end
+
+  def preprocess_options
+    if options.file_names[0] =~ /\.pdf$/i
+      @options.process_pdf = true
+    end
+    if !@options.rescale and !@options.build and !@options.make
+      @options.rescale = @options.build = @options.make = true
+    end  
+  end
+
+  def output_help
+    puts
+    output_version
+    puts
+    puts @opts
+    puts
+    puts "See source for extended documentation"
+    exit 
+  end
+
+  def output_version
+    puts "#{File.basename(__FILE__)} version #{VERSION}"
+  end
+
+  def run_app
+    if @options.process_pdf
+      build_pdf(@options.file_names) if @options.build
+      make_pdf(@options.file_names) if @options.make
+    else
+      rescale(@options.file_names[0]) if @options.rescale
+      build(@options.file_names[0]) if @options.build
+      make(@options.file_names[0]) if @options.make
+    end
+  end
+
+  def rescale(file_name)
+    check_file_names_argument([file_name], '.png file(s)')
+    return if file_name =~ /\d\d+_small.\w+$/ # already scaled
+    file_names = find_sequence(file_name)
+    small_file_names = find_small_sequence(file_name)
+    file_names.each do |file_name|
+      small_file_name_head = file_name.gsub(/(\d\d+)\.\w+/, '\1_small')
+      if !small_file_names.detect {|s| s =~ /#{small_file_name_head}*/}
+        rescale_image(file_name, small_file_name_head)
+      end
+    end
+  end
+
+  def build(file_name)
+    check_file_names_argument([file_name], 'correctly scaled .png file(s)')
+    file_names = find_small_sequence(file_name)
+    inner_tex = assemble_inner_tex(file_names)
+    File.open(BASE_PATH + '/' + file_name + INNER_SUFFIX + '.tex', 'w') do |target|
+      target.write(inner_tex)
+    end
+    outer_tex = assemble_outer_tex(file_name)
+    File.open(BASE_PATH + '/' + file_name + OUTER_SUFFIX + '.tex', 'w') do |target|
+      target.write(outer_tex)
+    end
+  end
+
+  def make(file_name)
+    check_file_names_argument([file_name], 'correctly scaled .png file(s)')
+    to_inner_pdf_file = to_inner_pdf_file(file_name)
+    to_pdf_file = file_name.gsub(/\d\d+(_small|).\w+$/,'.pdf')
+    inner_tex_file_head = file_name + INNER_SUFFIX
+    outer_tex_file_head = file_name + OUTER_SUFFIX
+    ["b-rex #{inner_tex_file_head}.tex",
+     "mv #{inner_tex_file_head}.pdf #{to_inner_pdf_file}",
+     "b-rex #{outer_tex_file_head}.tex",
+     "mv #{outer_tex_file_head}.pdf #{to_pdf_file}",
+     "rm #{to_inner_pdf_file}",
+     "rm -f #{inner_tex_file_head}.*",
+     "rm -f #{outer_tex_file_head}.*"
+     ].each do |action|
+       execute_action(action)
+    end
+  end
+
+  # Sub-sub-functions
+
+  def assemble_inner_tex(file_names)
+    if file_names.empty?
+      raise 'Rescale first!'
+    end
+
+    # header
+    content = <<-'EOS'
+\documentclass[12pt]{book}
+\usepackage{graphicx}
+\usepackage{nopageno}
+\usepackage[left=3em,right=3em,top=0em,bottom=3em]{geometry} 
+
+\title{}
+
+\author{Wybo Wiersma}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\noindent\makebox[\textwidth]{
+    EOS
+    content << '  \includegraphics[]{'
+    middle = 
+      '}' + "\n" +
+      '}' + "\n" +
+      "\n" +
+      '\noindent\makebox[\textwidth]{' + "\n" +
+      '  \includegraphics[]{'
+
+    content << file_names.join(middle)
+    # footer
+    content << '}' + "\n"
+    content << <<-'EOS'
+}
+
+\end{document}
+    EOS
+    return content
+  end
+
+  def assemble_outer_tex(file_name)
+    to_inner_pdf_file = to_inner_pdf_file(file_name)
+    # header
+    content = <<-'EOS'
+\documentclass[12pt]{letter}
+\usepackage{pdfpages}
+
+\begin{document}
+
+    EOS
+    content << '\includepdf[pages={2-}]{' + to_inner_pdf_file + '}' + "\n"
+    # footer
+    content << <<-'EOS'
+
+\end{document}
+    EOS
+    return content
+  end
+
+  def rescale_image(file_name, small_file_name_head)
+    width = 1390
+    height = 1950
+    img = Magick::Image.read(file_name).first
+    img.change_geometry!("#{width}x90000") do |cols, rows, img|
+      puts "Writing small: #{small_file_name_head}.jpg"
+      small = img.resize(cols, rows)
+      chopped = small.crop(Magick::NorthGravity, 0, 0, width, height)
+      chopped.units = Magick::PixelsPerInchResolution
+      chopped.density = '178'
+      chopped.write(small_file_name_head + '.jpg') { self.quality = 85 }
+    end
+    img = nil
+    GC.start
+  end
+
+  def find_sequence(file_name)
+    all_file_names = find_sequence_inner(file_name)
+    file_names = all_file_names.reject {|n| n =~ /\d\d+_small\.\w+$/}
+    return file_names
+  end
+
+  def find_small_sequence(file_name)
+    all_file_names = find_sequence_inner(file_name)
+    file_names = all_file_names.select {|n| n =~ /\d\d+_small\.\w+$/}
+    return file_names
+  end
+
+  def find_sequence_inner(file_name)
+    file_pre = file_name.gsub(/\d\d+(_small|)\.\w+$/, '')
+    all_file_names = Dir.glob(BASE_PATH + "/#{file_pre}*")
+    # prevents selection of assembled
+    file_names = all_file_names.select {|n| n =~ /#{file_pre}\d\d+(_small|)\.\w+$/}
+    file_names.collect! {|n| n.gsub(/\.\//, '')}.sort!
+    if file_name != file_names.first
+      raise 'File_name not equal to the first file_name of the sequence'
+    end
+    return file_names
+  end
+
+  def check_file_names_argument(file_names, file_text)
+    file_names.each do |file_name|
+      if file_name.nil? or !File.exists?(file_name)
+        puts "Needs file_name-argument for a file that exists. The name of the #{file_text}\n"
+        output_help
+        exit
+      end
+    end
+  end
+
+  def to_inner_pdf_file(file_name)
+    return (file_name + INNER_SUFFIX).gsub(/\./,'-') + '.pdf'
+  end
+
+  ### Pdf
+
+  def build_pdf(file_names)
+    check_file_names_argument(file_names, '.pdf file(s)')
+
+    sorted_file_names = find_sequence_pdf(file_names)
+    tex = assemble_pdf_tex(underline_commas(sorted_file_names))
+    File.open(BASE_PATH + '/' + file_assembled_pdf(file_names[0]) + '.tex',
+        'w') do |target|
+      target.write(tex)
+    end
+  end
+
+  def make_pdf(file_names)
+    check_file_names_argument(file_names, '.pdf file(s)')
+    file_pre = file_assembled_pdf(file_names[0])
+    sorted_file_names = find_sequence_pdf(file_names)
+    underlined_file_names = underline_commas(sorted_file_names)
+    rename_files(sorted_file_names, underlined_file_names)
+    ["b-rex '#{file_pre}.tex'",
+     "rm '#{file_pre}.tex'"
+    ].each do |action|
+      execute_action(action)
+    end
+    rename_files(underlined_file_names, sorted_file_names)
+  end
+
+  def assemble_pdf_tex(file_names)
+    # header
+    content = <<-'EOS'
+\documentclass[12pt]{letter}
+\usepackage{pdfpages}
+
+\begin{document}
+
+    EOS
+    angle = (@options.reverse ? 270 : 90)
+    file_names.each do |file_name|
+      content << '\includepdf[pages=-,' +
+        (@options.landscape ? "landscape=true,angle=#{angle}," : '') +
+        'rotateoversize=true,fitpaper=true]{' + file_name + '}' + "\n"
+    end
+    # footer
+    content << <<-'EOS'
+
+\end{document}
+    EOS
+    return content
+  end
+
+  def underline_commas(file_names)
+    file_names = file_names.dup
+    file_names.collect! {|f| f.gsub(/\.pdf/, '___pdf')}
+    file_names.collect! {|f| f.gsub(/\./, '_-_')}
+    file_names.collect! {|f| f.gsub(/___pdf/, '.pdf')}
+    file_names.collect! {|f| f.gsub(/,/, '___')}
+    file_names.collect! {|f| f.gsub(/\s/, '-_-')}
+    file_names
+  end
+
+  def rename_files(file_names, target_file_names)
+    file_names.each_with_index do |file_name, index|
+      if file_name != target_file_names[index]
+        execute_action("mv '#{file_name}' '#{target_file_names[index]}'")
+      end
+    end
+  end
+
+  def find_sequence_pdf(file_names)
+    sorted_file_names = []
+    if file_names.size > 1
+      sorted_file_names = file_names
+    else
+      file_pre = file_names[0].gsub(/\d+(_small|)\.\w+$/, '')
+      puts file_pre
+      all_file_names = Dir.glob(BASE_PATH + "/#{file_pre}*")
+      puts all_file_names
+      # prevents selection of assembled
+      sorted_file_names = all_file_names.select {|n| n =~ /#{file_pre}\d+(_small|)\.pdf$/i}
+      sorted_file_names.collect! {|n| n.gsub(/\.\//, '')}
+      sorted_file_names.sort! {|a, b| rank_pdf(a, file_pre) <=> rank_pdf(b, file_pre)}
+    end
+    return sorted_file_names
+  end
+
+  def rank_pdf(file_name, file_pre)
+    if file_name =~ /.*(\d+(,\d+)?).*$/
+      file_name =~ /#{file_pre}.*?(\d+(,\d+)?).*?$/
+    else
+      file_name =~ /.*?(\d+(,\d+)?).*?$/
+    end
+    string = $1 
+    raise "Niller" if string.nil?
+    strings = string.split(',') 
+    if strings[1].nil?
+      strings << '0'
+    end
+    numbers = strings.collect {|s| s.to_f}
+    raise "Nuller" if numbers.first == 0 
+    numbers
+  end
+
+  def file_assembled_pdf(file_name)
+    file_name.gsub(/\..*$/, '.tex-assembled')
+  end
+
+  def execute_action(action)
+    puts action
+    system "cd #{BASE_PATH}; #{action}"
+  end
+end
+
+# Create and run the application
+br = SRex.new(ARGV)
+br.run
