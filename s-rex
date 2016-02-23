@@ -1,7 +1,7 @@
 #!/usr/bin/env ruby
 
 # == Synopsis
-#   Scan-Ruby-Latex, s-rex in short, is a program for stitching
+#   Scan Ruby Latex, s-rex in short, is a program for stitching
 #   together scanned pages into a .pdf file. Requires b-rex and
 #   RMagick.
 #
@@ -58,8 +58,7 @@
 #   Ruby (inc rdoc, not included in Debian & Ubuntu, needs ruby and rdoc
 #   packages there), b-rex and RMagick
 #
-#   (b-rex can be found here
-#   http://en.logilogi.org/Wybo_Wiersma/User/Beamer_Ruby_Latex)
+#   (b-rex can be found here: https://github.com/wybo/b-rex)
 #
 # == Copyright
 #   Copyright (c) 2007 The LogiLogi Foundation. Licensed under the
