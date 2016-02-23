@@ -61,7 +61,7 @@
 #   (b-rex can be found here: https://github.com/wybo/b-rex)
 #
 # == Copyright
-#   Copyright (c) 2007 The LogiLogi Foundation. Licensed under the
+#   Copyright (c) 2007-2016 Wybo Wiersma. Licensed under the
 #   Affero GPL: http://www.fsf.org/licensing/licenses/agpl-3.0.html
 
 require 'optparse'
